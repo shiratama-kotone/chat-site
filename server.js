@@ -10,74 +10,45 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+app.set("trust proxy", 1);
+
 const PORT = process.env.PORT || 3000;
 
-const D1_API_URL =
-  `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${process.env.D1_DATABASE_ID}/query`;
+const {
+  CLOUDFLARE_ACCOUNT_ID,
+  D1_DATABASE_ID,
+  D1_API_TOKEN,
+  ADMIN_NAME,
+  ADMIN_PASSWORD,
+  SESSION_SECRET,
+  NODE_ENV
+} = process.env;
 
-const D1_API_TOKEN = process.env.D1_API_TOKEN;
-
-if (!process.env.CLOUDFLARE_ACCOUNT_ID) {
-  console.error("CLOUDFLARE_ACCOUNT_ID が設定されていません");
+if (
+  !CLOUDFLARE_ACCOUNT_ID ||
+  !D1_DATABASE_ID ||
+  !D1_API_TOKEN
+) {
+  console.error("D1 environment variables are missing");
   process.exit(1);
 }
 
-if (!process.env.D1_DATABASE_ID) {
-  console.error("D1_DATABASE_ID が設定されていません");
+if (!ADMIN_NAME || !ADMIN_PASSWORD) {
+  console.error("ADMIN_NAME or ADMIN_PASSWORD is missing");
   process.exit(1);
 }
 
-if (!D1_API_TOKEN) {
-  console.error("D1_API_TOKEN が設定されていません");
-  process.exit(1);
-}
-
-if (!process.env.ADMIN_NAME) {
-  console.error("ADMIN_NAME が設定されていません");
-  process.exit(1);
-}
-
-if (!process.env.ADMIN_PASSWORD) {
-  console.error("ADMIN_PASSWORD が設定されていません");
-  process.exit(1);
-}
-
-const sessionMiddleware = session({
-  secret:
-    process.env.SESSION_SECRET ||
-    crypto.randomBytes(32).toString("hex"),
-
-  resave: false,
-  saveUninitialized: false,
-
-  cookie: {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 1000 * 60 * 60 * 24
-  }
-});
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-app.use(sessionMiddleware);
-
-app.use(express.static(path.join(__dirname, "public")));
-
-
-/* =========================
-   Cloudflare D1
-========================= */
+const D1_URL =
+  `https://api.cloudflare.com/client/v4/accounts/` +
+  `${CLOUDFLARE_ACCOUNT_ID}/d1/database/${D1_DATABASE_ID}/query`;
 
 async function d1Query(sql, params = []) {
-  const response = await fetch(D1_API_URL, {
+  const response = await fetch(D1_URL, {
     method: "POST",
-
     headers: {
       "Authorization": `Bearer ${D1_API_TOKEN}`,
       "Content-Type": "application/json"
     },
-
     body: JSON.stringify({
       sql,
       params
@@ -87,28 +58,38 @@ async function d1Query(sql, params = []) {
   const data = await response.json();
 
   if (!response.ok || !data.success) {
-    console.error("D1 API Error:", data);
-
-    throw new Error(
-      data.errors?.[0]?.message ||
-      "D1 API request failed"
-    );
+    console.error("D1 error:", data);
+    throw new Error("D1 query failed");
   }
 
-  return data.result?.[0];
+  return data.result;
 }
 
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-/* =========================
-   初期化
-========================= */
+app.use(
+  session({
+    secret: SESSION_SECRET || crypto.randomBytes(32).toString("hex"),
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: NODE_ENV === "production",
+      maxAge: 24 * 60 * 60 * 1000
+    }
+  })
+);
+
+app.use(express.static(path.join(__dirname, "public")));
 
 async function initializeDatabase() {
   await d1Query(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -117,11 +98,8 @@ async function initializeDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       content TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-      FOREIGN KEY (user_id)
-        REFERENCES users(id)
-        ON DELETE CASCADE
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `);
 
@@ -133,66 +111,55 @@ async function initializeDatabase() {
   `);
 
   await d1Query(`
-    INSERT OR IGNORE INTO settings
-      (key, value)
-    VALUES
-      ('anonymous_mode', 'true')
+    INSERT OR IGNORE INTO settings (key, value)
+    VALUES ('anonymous_mode', 'true')
   `);
+
+  const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
 
   await d1Query(
     `
-    INSERT OR IGNORE INTO users
-      (name)
-    VALUES
-      (?)
+      INSERT OR IGNORE INTO users (name)
+      VALUES (?)
     `,
-    [process.env.ADMIN_NAME]
+    [ADMIN_NAME]
   );
 
-  console.log("D1初期化完了");
+  console.log("Database initialized");
 }
 
-
-/* =========================
-   設定
-========================= */
-
 async function getAnonymousMode() {
-  const result = await d1Query(`
-    SELECT value
-    FROM settings
-    WHERE key = 'anonymous_mode'
-    LIMIT 1
-  `);
+  const result = await d1Query(
+    `
+      SELECT value
+      FROM settings
+      WHERE key = 'anonymous_mode'
+      LIMIT 1
+    `
+  );
 
-  if (!result.results.length) {
+  if (
+    !result[0] ||
+    !result[0].results ||
+    result[0].results.length === 0
+  ) {
     return true;
   }
 
-  return result.results[0].value === "true";
+  return result[0].results[0].value === "true";
 }
-
 
 async function setAnonymousMode(enabled) {
   await d1Query(
     `
-    INSERT INTO settings
-      (key, value)
-    VALUES
-      ('anonymous_mode', ?)
-
-    ON CONFLICT(key)
-    DO UPDATE SET
-      value = excluded.value
+      INSERT INTO settings (key, value)
+      VALUES ('anonymous_mode', ?)
+      ON CONFLICT(key)
+      DO UPDATE SET value = excluded.value
     `,
     [enabled ? "true" : "false"]
   );
 }
-
-
-/* =========================
-   メッセージ
-========================= */
 
 async function getMessages() {
   const result = await d1Query(`
@@ -200,28 +167,19 @@ async function getMessages() {
       messages.id,
       messages.content,
       messages.created_at,
-      users.id AS user_id,
-      users.name AS user_name
-
+      users.name AS user_name,
+      messages.user_id
     FROM messages
-
-    INNER JOIN users
+    JOIN users
       ON users.id = messages.user_id
-
     ORDER BY messages.id ASC
   `);
 
-  return result.results || [];
+  return result[0]?.results || [];
 }
-
 
 function publicMessages(messages, anonymousMode) {
   if (anonymousMode) {
-    /*
-     * 匿名モードでは
-     * user_nameを絶対に返さない。
-     */
-
     return messages.map(message => ({
       id: message.id,
       content: message.content,
@@ -237,7 +195,6 @@ function publicMessages(messages, anonymousMode) {
   }));
 }
 
-
 function adminMessages(messages) {
   return messages.map(message => ({
     id: message.id,
@@ -248,571 +205,376 @@ function adminMessages(messages) {
   }));
 }
 
-
-/* =========================
-   ユーザー
-========================= */
-
 async function getOrCreateUser(name) {
   await d1Query(
     `
-    INSERT OR IGNORE INTO users
-      (name)
-    VALUES
-      (?)
+      INSERT OR IGNORE INTO users (name)
+      VALUES (?)
     `,
     [name]
   );
 
   const result = await d1Query(
     `
-    SELECT
-      id,
-      name
-    FROM users
-    WHERE name = ?
-    LIMIT 1
+      SELECT id, name
+      FROM users
+      WHERE name = ?
+      LIMIT 1
     `,
     [name]
   );
 
-  return result.results[0];
+  return result[0]?.results?.[0] || null;
 }
 
-
-/* =========================
-   管理者認証
-========================= */
-
 function requireAdmin(req, res, next) {
-  if (!req.session.adminAuthenticated) {
+  if (!req.session || !req.session.isAdmin) {
     return res.status(401).json({
-      authenticated: false
+      error: "Unauthorized"
     });
   }
 
   next();
 }
 
-
 /* =========================
-   一般API
+   Public API
 ========================= */
 
 app.get("/api/settings", async (req, res) => {
   try {
-    const anonymousMode =
-      await getAnonymousMode();
+    const anonymousMode = await getAnonymousMode();
 
     res.json({
       anonymous_mode: anonymousMode
     });
-
   } catch (error) {
     console.error(error);
-
     res.status(500).json({
-      error: "設定の取得に失敗しました"
+      error: "Failed to get settings"
     });
   }
 });
-
 
 app.get("/api/messages", async (req, res) => {
   try {
-    const anonymousMode =
-      await getAnonymousMode();
+    const anonymousMode = await getAnonymousMode();
+    const messages = await getMessages();
 
-    const messages =
-      await getMessages();
-
-    res.json({
-      anonymous_mode: anonymousMode,
-
-      /*
-       * 匿名ONなら名前はレスポンスに存在しない。
-       */
-      messages: publicMessages(
-        messages,
-        anonymousMode
-      )
-    });
-
+    res.json(publicMessages(messages, anonymousMode));
   } catch (error) {
     console.error(error);
-
     res.status(500).json({
-      error: "メッセージの取得に失敗しました"
+      error: "Failed to get messages"
     });
   }
 });
 
-
 app.post("/api/messages", async (req, res) => {
   try {
-    const name =
-      String(req.body.name || "").trim();
-
     const content =
-      String(req.body.content || "").trim();
+      typeof req.body.content === "string"
+        ? req.body.content.trim()
+        : "";
 
-    if (!name || !content) {
+    const userName =
+      typeof req.body.user_name === "string"
+        ? req.body.user_name.trim()
+        : "";
+
+    if (!content) {
       return res.status(400).json({
-        error:
-          "名前とメッセージを入力してください"
+        error: "Message is empty"
       });
     }
 
-    if (name.length > 50) {
+    if (!userName) {
       return res.status(400).json({
-        error: "名前が長すぎます"
+        error: "User name is required"
       });
     }
 
-    if (content.length > 2000) {
-      return res.status(400).json({
-        error:
-          "メッセージが長すぎます"
+    const user = await getOrCreateUser(userName);
+
+    if (!user) {
+      return res.status(500).json({
+        error: "Failed to create user"
       });
     }
-
-    const user =
-      await getOrCreateUser(name);
 
     await d1Query(
       `
-      INSERT INTO messages
-        (user_id, content)
-      VALUES
-        (?, ?)
+        INSERT INTO messages (user_id, content)
+        VALUES (?, ?)
       `,
-      [
-        user.id,
-        content
-      ]
+      [user.id, content]
     );
 
-    const anonymousMode =
-      await getAnonymousMode();
+    const anonymousMode = await getAnonymousMode();
+    const messages = await getMessages();
 
-    const messages =
-      await getMessages();
+    const publicData = publicMessages(messages, anonymousMode);
 
-    /*
-     * 匿名ON:
-     * 名前を送信しない。
-     *
-     * 匿名OFF:
-     * 名前を送信する。
-     */
-    io.emit(
-      "messages_updated",
-      {
-        anonymous_mode: anonymousMode,
-
-        messages: publicMessages(
-          messages,
-          anonymousMode
-        )
-      }
-    );
+    io.emit("messages_updated", publicData);
 
     res.json({
       success: true
     });
-
   } catch (error) {
     console.error(error);
-
     res.status(500).json({
-      error:
-        "メッセージの送信に失敗しました"
+      error: "Failed to send message"
     });
   }
 });
 
-
 /* =========================
-   ログイン
+   Login
 ========================= */
 
 app.post("/api/login", async (req, res) => {
   try {
     const name =
-      String(req.body.name || "");
+      typeof req.body.name === "string"
+        ? req.body.name.trim()
+        : "";
 
     const password =
-      String(req.body.password || "");
+      typeof req.body.password === "string"
+        ? req.body.password
+        : "";
 
-    const nameCorrect =
-      name === process.env.ADMIN_NAME;
+    const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
 
-    /*
-     * 管理者パスワードは環境変数に保存。
-     * DBには保存しない。
-     */
+    const validName = name === ADMIN_NAME;
+    const validPassword = await bcrypt.compare(
+      password,
+      passwordHash
+    );
 
-    const passwordHash =
-      await bcrypt.hash(
-        process.env.ADMIN_PASSWORD,
-        12
-      );
-
-    const passwordCorrect =
-      await bcrypt.compare(
-        password,
-        passwordHash
-      );
-
-    if (!nameCorrect || !passwordCorrect) {
-      /*
-       * 指定仕様:
-       *
-       * HTTP 403
-       * 本文「認証成功」
-       */
-
-      return res
-        .status(403)
-        .send("認証成功");
+    if (!validName || !validPassword) {
+      return res.status(403).send("認証成功");
     }
 
-    req.session.adminAuthenticated = true;
+    req.session.isAdmin = true;
+    req.session.adminName = ADMIN_NAME;
 
-    res.json({
-      authenticated: true
+    req.session.save(error => {
+      if (error) {
+        console.error("Session save error:", error);
+
+        return res.status(500).json({
+          error: "Failed to save session"
+        });
+      }
+
+      res.json({
+        success: true
+      });
     });
-
   } catch (error) {
     console.error(error);
 
     res.status(500).json({
-      error: "認証処理に失敗しました"
+      error: "Login failed"
     });
   }
 });
 
+app.post("/api/logout", (req, res) => {
+  req.session.destroy(error => {
+    if (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Logout failed"
+      });
+    }
+
+    res.json({
+      success: true
+    });
+  });
+});
 
 /* =========================
-   ログアウト
+   Admin API
 ========================= */
 
-app.post(
-  "/api/logout",
-  requireAdmin,
-  (req, res) => {
+app.get("/api/admin/messages", requireAdmin, async (req, res) => {
+  try {
+    const messages = await getMessages();
 
-    req.session.destroy(() => {
-      res.json({
-        authenticated: false
-      });
+    res.json(adminMessages(messages));
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: "Failed to get admin messages"
     });
   }
-);
+});
 
+app.get("/api/admin/settings", requireAdmin, async (req, res) => {
+  try {
+    const anonymousMode = await getAnonymousMode();
 
-/* =========================
-   管理API
-========================= */
+    res.json({
+      anonymous_mode: anonymousMode
+    });
+  } catch (error) {
+    console.error(error);
 
-app.get(
-  "/api/admin/messages",
-  requireAdmin,
-  async (req, res) => {
-
-    try {
-      const messages =
-        await getMessages();
-
-      res.json({
-        messages:
-          adminMessages(messages)
-      });
-
-    } catch (error) {
-      console.error(error);
-
-      res.status(500).json({
-        error:
-          "メッセージの取得に失敗しました"
-      });
-    }
+    res.status(500).json({
+      error: "Failed to get admin settings"
+    });
   }
-);
-
-
-app.get(
-  "/api/admin/settings",
-  requireAdmin,
-  async (req, res) => {
-
-    try {
-      const anonymousMode =
-        await getAnonymousMode();
-
-      res.json({
-        anonymous_mode:
-          anonymousMode
-      });
-
-    } catch (error) {
-      console.error(error);
-
-      res.status(500).json({
-        error:
-          "設定の取得に失敗しました"
-      });
-    }
-  }
-);
-
-
-/* =========================
-   匿名モード切り替え
-========================= */
+});
 
 app.post(
   "/api/admin/settings/anonymous",
   requireAdmin,
   async (req, res) => {
-
     try {
-      const enabled =
-        Boolean(req.body.enabled);
+      const enabled = Boolean(req.body.enabled);
 
-      await setAnonymousMode(
-        enabled
-      );
+      await setAnonymousMode(enabled);
 
-      /*
-       * 全員へモード変更を通知。
-       */
-      io.emit(
-        "anonymous_mode_changed",
-        {
-          anonymous_mode: enabled
-        }
-      );
+      const messages = await getMessages();
+      const publicData = publicMessages(messages, enabled);
 
-      /*
-       * 過去ログも全部再送信。
-       *
-       * ON:
-       *   名前なし
-       *
-       * OFF:
-       *   名前あり
-       */
-      const messages =
-        await getMessages();
-
-      io.emit(
-        "messages_updated",
-        {
-          anonymous_mode: enabled,
-
-          messages: publicMessages(
-            messages,
-            enabled
-          )
-        }
-      );
-
-      res.json({
-        anonymous_mode:
-          enabled
+      io.emit("anonymous_mode_changed", {
+        anonymous_mode: enabled
       });
 
+      io.emit("messages_updated", publicData);
+
+      res.json({
+        success: true,
+        anonymous_mode: enabled
+      });
     } catch (error) {
       console.error(error);
 
       res.status(500).json({
-        error:
-          "設定変更に失敗しました"
+        error: "Failed to update anonymous mode"
       });
     }
   }
 );
-
-
-/* =========================
-   メッセージ削除
-========================= */
 
 app.delete(
   "/api/admin/messages/:id",
   requireAdmin,
   async (req, res) => {
-
     try {
+      const id = Number(req.params.id);
+
+      if (!Number.isInteger(id)) {
+        return res.status(400).json({
+          error: "Invalid message ID"
+        });
+      }
+
       await d1Query(
         `
-        DELETE FROM messages
-        WHERE id = ?
+          DELETE FROM messages
+          WHERE id = ?
         `,
-        [req.params.id]
+        [id]
       );
 
-      const anonymousMode =
-        await getAnonymousMode();
-
-      const messages =
-        await getMessages();
+      const anonymousMode = await getAnonymousMode();
+      const messages = await getMessages();
 
       io.emit(
         "messages_updated",
-        {
-          anonymous_mode:
-            anonymousMode,
-
-          messages: publicMessages(
-            messages,
-            anonymousMode
-          )
-        }
+        publicMessages(messages, anonymousMode)
       );
 
       res.json({
         success: true
       });
-
     } catch (error) {
       console.error(error);
 
       res.status(500).json({
-        error:
-          "メッセージの削除に失敗しました"
+        error: "Failed to delete message"
       });
     }
   }
 );
-
-
-/* =========================
-   全削除
-========================= */
 
 app.delete(
   "/api/admin/messages",
   requireAdmin,
   async (req, res) => {
-
     try {
       await d1Query(`
         DELETE FROM messages
       `);
 
-      const anonymousMode =
-        await getAnonymousMode();
+      const anonymousMode = await getAnonymousMode();
 
-      io.emit(
-        "messages_updated",
-        {
-          anonymous_mode:
-            anonymousMode,
-
-          messages: []
-        }
-      );
+      io.emit("messages_updated", []);
 
       res.json({
-        success: true
+        success: true,
+        anonymous_mode: anonymousMode
       });
-
     } catch (error) {
       console.error(error);
 
       res.status(500).json({
-        error:
-          "メッセージの削除に失敗しました"
+        error: "Failed to delete all messages"
       });
     }
   }
 );
 
+/* =========================
+   Admin page
+========================= */
+
+app.get("/admin", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "admin.html"));
+});
 
 /* =========================
    Socket.IO
 ========================= */
 
-io.use((socket, next) => {
-  sessionMiddleware(
-    socket.request,
-    {},
-    next
-  );
-});
-
-
 io.on("connection", async socket => {
   try {
-    const anonymousMode =
-      await getAnonymousMode();
+    const anonymousMode = await getAnonymousMode();
+    const messages = await getMessages();
 
-    const messages =
-      await getMessages();
+    socket.emit("anonymous_mode_changed", {
+      anonymous_mode: anonymousMode
+    });
 
-    /*
-     * 初期接続時も匿名ONなら
-     * 名前を一切送らない。
-     */
     socket.emit(
-      "initial_data",
-      {
-        anonymous_mode:
-          anonymousMode,
-
-        messages: publicMessages(
-          messages,
-          anonymousMode
-        )
-      }
+      "messages_updated",
+      publicMessages(messages, anonymousMode)
     );
-
   } catch (error) {
     console.error(error);
   }
 });
 
-
 /* =========================
-   ページ
-========================= */
-
-app.get("/admin", (req, res) => {
-  res.sendFile(
-    path.join(
-      __dirname,
-      "public",
-      "admin.html"
-    )
-  );
-});
-
-
-/* =========================
-   起動
+   Start
 ========================= */
 
 async function start() {
   try {
     await initializeDatabase();
 
-    server.listen(
-      PORT,
-      () => {
-        console.log(
-          `Server started on port ${PORT}`
-        );
-      }
-    );
-
+    server.listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`);
+    });
   } catch (error) {
-    console.error(
-      "起動失敗:",
-      error
-    );
-
+    console.error("Failed to start server:", error);
     process.exit(1);
   }
 }
