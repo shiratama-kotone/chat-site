@@ -38,10 +38,6 @@ function renderMessages(messages) {
     const user = document.createElement("div");
     user.className = "message-user";
 
-    /*
-     * 匿名モードONの場合、サーバーから user_name 自体が
-     * 送られてこないので、ここでも名前を取得できない。
-     */
     if (anonymousMode) {
       user.textContent = "匿名";
     } else {
@@ -71,24 +67,67 @@ function renderMessages(messages) {
   messagesElement.scrollTop = messagesElement.scrollHeight;
 }
 
-socket.on("initial_data", data => {
-  anonymousMode = data.anonymous_mode;
-  updateHeader();
-  renderMessages(data.messages);
-});
+/* =========================
+   初期設定
+========================= */
+
+async function loadSettings() {
+  try {
+    const response = await fetch("/api/settings");
+
+    if (!response.ok) {
+      throw new Error("Failed to load settings");
+    }
+
+    const data = await response.json();
+
+    anonymousMode = Boolean(data.anonymous_mode);
+
+    updateHeader();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+/* =========================
+   初期メッセージ
+========================= */
+
+async function loadMessages() {
+  try {
+    const response = await fetch("/api/messages");
+
+    if (!response.ok) {
+      throw new Error("Failed to load messages");
+    }
+
+    const messages = await response.json();
+
+    renderMessages(messages);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+/* =========================
+   Socket.IO
+========================= */
 
 socket.on("anonymous_mode_changed", data => {
-  anonymousMode = data.anonymous_mode;
+  anonymousMode = Boolean(data.anonymous_mode);
 
   updateHeader();
+
+  loadMessages();
 });
 
-socket.on("messages_updated", data => {
-  anonymousMode = data.anonymous_mode;
-
-  updateHeader();
-  renderMessages(data.messages);
+socket.on("messages_updated", messages => {
+  renderMessages(messages);
 });
+
+/* =========================
+   メッセージ送信
+========================= */
 
 form.addEventListener("submit", async event => {
   event.preventDefault();
@@ -111,7 +150,7 @@ form.addEventListener("submit", async event => {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        name,
+        user_name: name,
         content
       })
     });
@@ -127,8 +166,21 @@ form.addEventListener("submit", async event => {
     contentInput.focus();
 
   } catch (error) {
+    console.error(error);
     alert("サーバーに接続できませんでした");
   } finally {
     button.disabled = false;
   }
 });
+
+/* =========================
+   初期読み込み
+========================= */
+
+async function initialize() {
+  await loadSettings();
+  await loadMessages();
+  updateHeader();
+}
+
+initialize();
