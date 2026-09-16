@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>匿名掲示板</title>
+
+  <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+
+  <header>
+    <h1 id="site-title">匿名掲示板</h1>
+  </header>
+
+  <main>
+
+    <section id="messages" class="messages"></section>
+
+    <form id="message-form" class="message-form">
+
+      <input
+        id="name"
+        type="text"
+        maxlength="50"
+        placeholder="名前"
+        autocomplete="nickname"
+        required
+      >
+
+      <textarea
+        id="content"
+        maxlength="2000"
+        placeholder="メッセージ"
+        required
+      ></textarea>
+
+      <button type="submit">
+        送信
+      </button>
+
+    </form>
+
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+
+</body>
+</html>

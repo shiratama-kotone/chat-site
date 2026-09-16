@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>管理ページ</title>
+
+  <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+
+  <main class="admin-container">
+
+    <section id="login-section">
+
+      <h1>管理ページ</h1>
+
+      <form id="login-form">
+
+        <label>
+          名前
+          <input
+            id="admin-name"
+            type="text"
+            autocomplete="username"
+            required
+          >
+        </label>
+
+        <label>
+          パスワード
+          <input
+            id="admin-password"
+            type="password"
+            autocomplete="current-password"
+            required
+          >
+        </label>
+
+        <button type="submit">
+          ログイン
+        </button>
+
+      </form>
+
+      <p id="login-error"></p>
+
+    </section>
+
+    <section id="admin-section" hidden>
+
+      <h1>管理ページ</h1>
+
+      <section class="admin-settings">
+
+        <h2>設定</h2>
+
+        <div class="setting-row">
+
+          <span>匿名モード</span>
+
+          <button id="anonymous-toggle">
+            読み込み中...
+          </button>
+
+        </div>
+
+        <p id="mode-description"></p>
+
+      </section>
+
+      <section>
+
+        <div class="admin-message-header">
+
+          <h2>メッセージ管理</h2>
+
+          <button id="delete-all">
+            すべて削除
+          </button>
+
+        </div>
+
+        <div id="admin-messages"></div>
+
+      </section>
+
+      <button id="logout">
+        ログアウト
+      </button>
+
+    </section>
+
+  </main>
+
+  <script src="/admin.js"></script>
+
+</body>
+</html>
